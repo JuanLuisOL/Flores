@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flores Luminosas</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #020818; width: 100vw; height: 100vh; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ─── Setup ────────────────────────────────────────────────────────────
+var canvas = document.getElementById('c');
+var ctx    = canvas.getContext('2d');
+var W, H, cx, scale;
+var startTime    = null;
+var GROW_DUR     = 4.5;
+var BREEZE_START = 5.2;
+
+// Scene data
+var flowerDefs  = [];
+var foliageDefs = [];
+var grassDefs   = [];
+
+// Pollen
+var pollenParts    = [];
+var pollenActive   = false;
+var lastPollen     = 0;
+
+// Ambient particles
+var ambientParts = [];
+
+// ─── Math helpers ─────────────────────────────────────────────────────
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function easeOut3(t) { t = clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); }
+function easeOut5(t) { t = clamp(t, 0, 1); return 1 - Math.pow(1 - t, 5); }
+function progress(t, delay, dur) { return clamp((t - delay) / dur, 0, 1); }
+
+function breezeVal(t, phase, amp) {
+  var e    = Math.max(0, t - BREEZE_START);
+  var fade = clamp(e / 2.0, 0, 1);
+  return (Math.sin(e * 1.0 + phase) * 0.7 + Math.sin(e * 0.58 + phase * 1.4) * 0.3) * amp * fade;
+}
+
+function bezPt(t, a, b, c, d) {
+  var m = 1 - t;
+  return m*m*m*a + 3*m*m*t*b + 3*m*t*t*c + t*t*t*d;
+}
+function bezTan(t, a, b, c, d) {
+  var m = 1 - t;
+  return 3*(m*m*(b-a) + 2*m*t*(c-b) + t*t*(d-c));
+}
+
+// ─── Stem point (position + tangent angle on a flower's bezier curve) ─
+function stemPt(fd, stemProg, leafT, bz) {
+  var x0 = fd.rootX, y0 = fd.rootY;
+  var x3 = fd.tipX + bz * fd.bAmp * 22;
+  var y3 = fd.tipY;
+  var x1 = x0 + fd.cp1x + bz * fd.bAmp * 8;
+  var y1 = y0 + fd.cp1y;
+  var x2 = x0 + fd.cp2x + bz * fd.bAmp * 18;
+  var y2 = y0 + fd.cp2y;
+  var tt = leafT * stemProg;
+  return {
+    x:     bezPt(tt, x0, x1, x2, x3),
+    y:     bezPt(tt, y0, y1, y2, y3),
+    angle: Math.atan2(bezTan(tt, y0, y1, y2, y3), bezTan(tt, x0, x1, x2, x3))
+  };
+}
+
+// ─── Draw organic stem (filled tapered bezier shape) ─────────────────
+function drawStem(fd, prog, bz) {
+  if (prog <= 0) return;
+  var N  = 40;
+  var x0 = fd.rootX, y0 = fd.rootY;
+  var x3 = fd.tipX + bz * fd.bAmp * 22;
+  var y3 = fd.tipY;
+  var x1 = x0 + fd.cp1x + bz * fd.bAmp * 8;
+  var y1 = y0 + fd.cp1y;
+  var x2 = x0 + fd.cp2x + bz * fd.bAmp * 18;
+  var y2 = y0 + fd.cp2y;
+  var baseW = fd.thick * scale * 1.0;
+  var tipW  = 1.2 * scale;
+  var left  = [];
+  var right = [];
+  var mid   = [];
+
+  for (var i = 0; i <= N; i++) {
+    var tt  = (i / N) * prog;
+    var px  = bezPt(tt, x0, x1, x2, x3);
+    var py  = bezPt(tt, y0, y1, y2, y3);
+    var dx  = bezTan(tt, x0, x1, x2, x3);
+    var dy  = bezTan(tt, y0, y1, y2, y3);
+    var len = Math.sqrt(dx*dx + dy*dy) || 1;
+    var nx  = -dy / len;
+    var ny  =  dx / len;
+    var w   = (baseW * (1 - i/N) + tipW * (i/N)) * 0.5;
+    left.push({ x: px + nx*w, y: py + ny*w });
+    right.push({ x: px - nx*w, y: py - ny*w });
+    mid.push({ x: px, y: py });
+  }
+
+  ctx.save();
+  var grad = ctx.createLinearGradient(x0, y0, x3, y3);
+  grad.addColorStop(0,    'rgba(40,100,85,0.94)');
+  grad.addColorStop(0.35, 'rgba(72,150,125,0.96)');
+  grad.addColorStop(0.70, 'rgba(58,132,110,0.90)');
+  grad.addColorStop(1,    'rgba(38,90,76,0.58)');
+  ctx.shadowColor = 'rgba(80,200,160,0.20)';
+  ctx.shadowBlur  = 12;
+  ctx.beginPath();
+  ctx.moveTo(left[0].x, left[0].y);
+  for (var i = 1; i < left.length; i++) ctx.lineTo(left[i].x, left[i].y);
+  for (var i = right.length - 1; i >= 0; i--) ctx.lineTo(right[i].x, right[i].y);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(140,215,190,0.12)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(mid[0].x, mid[0].y);
+  for (var i = 1; i < mid.length; i++) ctx.lineTo(mid[i].x, mid[i].y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Draw leaf (anchored to stem tangent angle) ───────────────────────
+function drawLeaf(lx, ly, stemAngle, leafAngle, size, prog, alpha, flip) {
+  if (prog <= 0) return;
+  var p = clamp(prog, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = alpha * clamp(p * 1.8, 0, 1);
+  ctx.translate(lx, ly);
+  ctx.rotate(stemAngle + leafAngle * (flip ? -1 : 1));
+  ctx.scale(p * (flip ? -1 : 1), p);
+  var grad = ctx.createLinearGradient(0, 0, size, 0);
+  grad.addColorStop(0,   'rgba(82,150,198,0.74)');
+  grad.addColorStop(0.4, 'rgba(52,115,172,0.60)');
+  grad.addColorStop(1,   'rgba(18,62,128,0.08)');
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(size*0.28, -size*0.34, size*0.74, -size*0.24, size, 0);
+  ctx.bezierCurveTo(size*0.74,  size*0.16, size*0.28,  size*0.20, 0,    0);
+  ctx.fillStyle   = grad;
+  ctx.shadowColor = 'rgba(65,145,215,0.22)';
+  ctx.shadowBlur  = 6;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(145,208,232,0.20)';
+  ctx.lineWidth   = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(size*0.06, 0);
+  ctx.quadraticCurveTo(size*0.5, -size*0.05, size*0.90, 0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Draw glowing flower ──────────────────────────────────────────────
+function drawFlower(x, y, prog, size, bz, bAmp) {
+  if (prog <= 0) return;
+  var p    = clamp(prog, 0, 1);
+  var tilt = bz * bAmp * 0.18;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tilt);
+
+  // Outer halo
+  var halo = ctx.createRadialGradient(0, 0, size*0.3, 0, 0, size*5.0);
+  halo.addColorStop(0,   'rgba(175,228,255,' + (0.22*p) + ')');
+  halo.addColorStop(0.4, 'rgba(95,165,255,'  + (0.09*p) + ')');
+  halo.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.arc(0, 0, size*5.0, 0, Math.PI*2);
+  ctx.fillStyle = halo;
+  ctx.fill();
+
+  // Petals — very wide and thick
+  var petalCount = 5;
+  for (var i = 0; i < petalCount; i++) {
+    var ang = (i / petalCount) * Math.PI * 2 - Math.PI * 0.5;
+    ctx.save();
+    ctx.rotate(ang);
+    ctx.scale(p, p);
+    var pw = size * 0.92;
+    var ph = size * 1.05;
+    var pg = ctx.createRadialGradient(0, -ph*0.28, 0, 0, -ph*0.28, ph*1.3);
+    pg.addColorStop(0,    'rgba(255,255,255,' + (0.99*p) + ')');
+    pg.addColorStop(0.18, 'rgba(235,250,255,' + (0.95*p) + ')');
+    pg.addColorStop(0.50, 'rgba(168,222,255,' + (0.74*p) + ')');
+    pg.addColorStop(0.82, 'rgba(92,158,244,'  + (0.32*p) + ')');
+    pg.addColorStop(1,    'rgba(44,102,212,'  + (0.04*p) + ')');
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-pw*0.74, -ph*0.14, -pw*0.82, -ph*0.60, 0, -ph);
+    ctx.bezierCurveTo( pw*0.82, -ph*0.60,  pw*0.74, -ph*0.14, 0,  0);
+    ctx.fillStyle   = pg;
+    ctx.shadowColor = 'rgba(200,240,255,0.95)';
+    ctx.shadowBlur  = 42;
+    ctx.fill();
+    // Petal vein
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.26*p) + ')';
+    ctx.lineWidth   = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(0, -ph*0.04);
+    ctx.quadraticCurveTo(pw*0.08, -ph*0.50, 0, -ph*0.96);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Center glow
+  var cg = ctx.createRadialGradient(0, 0, 0, 0, 0, size*0.95);
+  cg.addColorStop(0,    'rgba(255,255,255,' + p + ')');
+  cg.addColorStop(0.22, 'rgba(232,252,255,' + (0.97*p) + ')');
+  cg.addColorStop(0.52, 'rgba(172,222,255,' + (0.78*p) + ')');
+  cg.addColorStop(0.82, 'rgba(100,165,246,' + (0.40*p) + ')');
+  cg.addColorStop(1,    'rgba(48,108,220,'  + (0.05*p) + ')');
+  ctx.beginPath();
+  ctx.arc(0, 0, size*0.95*p, 0, Math.PI*2);
+  ctx.fillStyle   = cg;
+  ctx.shadowColor = 'rgba(220,248,255,1)';
+  ctx.shadowBlur  = 65;
+  ctx.fill();
+
+  // Pure white core
+  ctx.beginPath();
+  ctx.arc(0, 0, size*0.42*p, 0, Math.PI*2);
+  ctx.fillStyle   = 'rgba(255,255,255,' + p + ')';
+  ctx.shadowBlur  = 48;
+  ctx.fill();
+  ctx.restore();
+}
+
+// ─── Draw grass blade (organic filled bezier) ─────────────────────────
+function drawGrass(g, prog, bz) {
+  if (prog <= 0) return;
+  var p   = clamp(prog, 0, 1);
+  var h   = g.h * p;
+  var bw  = bz * 18;
+  var x0  = g.x, y0 = g.y;
+  var tx  = x0 + g.lean + g.curl + bw;
+  var ty  = y0 - h;
+  var cp1x = x0 + g.lean*0.25 + g.curl*0.03 + bw*0.12;
+  var cp1y = y0 - h*0.26;
+  var cp2x = x0 + g.lean*0.62 + g.curl*0.55 + bw*0.58;
+  var cp2y = y0 - h*0.66;
+  var N    = 24;
+  var left = [], right = [], mid = [];
+
+  for (var i = 0; i <= N; i++) {
+    var tt  = i / N;
+    var mt  = 1 - tt;
+    var px  = mt*mt*mt*x0 + 3*mt*mt*tt*cp1x + 3*mt*tt*tt*cp2x + tt*tt*tt*tx;
+    var py  = mt*mt*mt*y0 + 3*mt*mt*tt*cp1y + 3*mt*tt*tt*cp2y + tt*tt*tt*ty;
+    var dx  = 3*(mt*mt*(cp1x-x0) + 2*mt*tt*(cp2x-cp1x) + tt*tt*(tx-cp2x));
+    var dy  = 3*(mt*mt*(cp1y-y0) + 2*mt*tt*(cp2y-cp1y) + tt*tt*(ty-cp2y));
+    var len = Math.sqrt(dx*dx + dy*dy) || 1;
+    var nx  = -dy / len;
+    var ny  =  dx / len;
+    var w   = (g.thick + (0.3 - g.thick) * tt) * 0.5;
+    left.push({ x: px + nx*w, y: py + ny*w });
+    right.push({ x: px - nx*w, y: py - ny*w });
+    mid.push({ x: px, y: py });
+  }
+
+  ctx.save();
+  ctx.globalAlpha = g.alpha;
+  var grad = ctx.createLinearGradient(x0, y0, tx, ty);
+  grad.addColorStop(0,    'rgba(58,128,172,0.82)');
+  grad.addColorStop(0.45, 'rgba(78,155,198,0.64)');
+  grad.addColorStop(1,    'rgba(40,98,152,0.16)');
+  ctx.shadowColor = 'rgba(68,142,202,0.08)';
+  ctx.shadowBlur  = 4;
+  ctx.beginPath();
+  ctx.moveTo(left[0].x, left[0].y);
+  for (var i = 1; i < left.length; i++) ctx.lineTo(left[i].x, left[i].y);
+  for (var i = right.length-1; i >= 0; i--) ctx.lineTo(right[i].x, right[i].y);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(158,218,238,0.08)';
+  ctx.lineWidth   = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(mid[0].x, mid[0].y);
+  for (var i = 1; i < mid.length; i++) ctx.lineTo(mid[i].x, mid[i].y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Particles ────────────────────────────────────────────────────────
+function makeAmbient() {
+  return {
+    x:       cx + (Math.random() - 0.5) * W * 0.9,
+    y:       Math.random() * H * 0.80,
+    r:       0.6 + Math.random() * 2.0,
+    phase:   Math.random() * Math.PI * 2,
+    speed:   0.25 + Math.random() * 0.6,
+    drift:   (Math.random() - 0.5) * 0.18,
+    life:    Math.random() * 3,
+    maxLife: 2.5 + Math.random() * 3.5,
+    alpha:   0.25 + Math.random() * 0.55
+  };
+}
+
+function spawnPollen() {
+  pollenParts.push({
+    x:       cx + (Math.random() - 0.5) * 180 * scale,
+    y:       H * 0.28 + Math.random() * H * 0.25,
+    r:       1.2 + Math.random() * 2.5,
+    vx:      (Math.random() - 0.5) * 0.8,
+    vy:      -(0.3 + Math.random() * 0.7),
+    life:    0,
+    maxLife: 3 + Math.random() * 2.5,
+    alpha:   0.5 + Math.random() * 0.45,
+    phase:   Math.random() * Math.PI * 2
+  });
+}
+
+function drawParticles(t) {
+  for (var i = 0; i < ambientParts.length; i++) {
+    var p = ambientParts[i];
+    p.life += 0.016 * p.speed;
+    p.x    += p.drift;
+    p.y    -= p.speed * 0.010;
+    if (p.life > p.maxLife) { Object.assign(p, makeAmbient()); p.life = 0; }
+    var lt    = p.life / p.maxLife;
+    var alpha = (lt < 0.15 ? lt/0.15 : lt > 0.78 ? (1-lt)/0.22 : 1) * p.alpha;
+    var pulse = 0.6 + 0.4 * Math.sin(t * 1.7 + p.phase);
+    ctx.save();
+    ctx.globalAlpha  = alpha * pulse;
+    ctx.fillStyle    = '#aad8ff';
+    ctx.shadowColor  = '#55aaff';
+    ctx.shadowBlur   = 9;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  for (var i = pollenParts.length - 1; i >= 0; i--) {
+    var p  = pollenParts[i];
+    p.life += 0.016;
+    p.x    += p.vx + Math.sin(t * 1.2 + p.phase) * 0.4;
+    p.y    += p.vy;
+    var lt  = p.life / p.maxLife;
+    if (lt > 1) { pollenParts.splice(i, 1); continue; }
+    var alpha = (lt < 0.15 ? lt/0.15 : lt > 0.70 ? (1-lt)/0.30 : 1) * p.alpha;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = '#ddf2ff';
+    ctx.shadowColor = '#aaddff';
+    ctx.shadowBlur  = 12;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─── Build scene ──────────────────────────────────────────────────────
+function buildScene() {
+  // Helper: cp dy relative from rootY to tipY fraction
+  function cpdy(rootYFrac, tipYFrac, frac) {
+    return -(H * rootYFrac - H * tipYFrac) * frac;
+  }
+
+  // ── Main flower stems ──────────────────────────────────────────────
+  flowerDefs = [
+    {
+      rootX: cx - 195*scale, rootY: H*0.86,
+      tipX:  cx - 238*scale, tipY:  H*0.50,
+      cp1x:  -22*scale, cp1y: cpdy(0.86, 0.50, 0.30),
+      cp2x:  -42*scale, cp2y: cpdy(0.86, 0.50, 0.68),
+      thick: 9, size: 56*scale, delay: 0.75, bPhase: 1.80, bAmp: 1.30,
+      leaves: [
+        { t: 0.32, la: 0.80, sz: 62*scale, flip: false },
+        { t: 0.62, la: 0.85, sz: 50*scale, flip: true  }
+      ]
+    },
+    {
+      rootX: cx - 118*scale, rootY: H*0.84,
+      tipX:  cx - 150*scale, tipY:  H*0.375,
+      cp1x:  -20*scale, cp1y: cpdy(0.84, 0.375, 0.30),
+      cp2x:  -36*scale, cp2y: cpdy(0.84, 0.375, 0.68),
+      thick: 12, size: 66*scale, delay: 0.45, bPhase: 0.55, bAmp: 1.00,
+      leaves: [
+        { t: 0.26, la: 0.82, sz: 76*scale, flip: false },
+        { t: 0.50, la: 0.76, sz: 64*scale, flip: true  },
+        { t: 0.70, la: 0.88, sz: 52*scale, flip: false }
+      ]
+    },
+    {
+      rootX: cx + 5*scale,  rootY: H*0.84,
+      tipX:  cx + 2*scale,  tipY:  H*0.23,
+      cp1x:  -12*scale, cp1y: cpdy(0.84, 0.23, 0.28),
+      cp2x:   16*scale, cp2y: cpdy(0.84, 0.23, 0.66),
+      thick: 14, size: 76*scale, delay: 0.00, bPhase: 0.00, bAmp: 0.72,
+      leaves: [
+        { t: 0.22, la: 0.80, sz: 86*scale, flip: true  },
+        { t: 0.40, la: 0.85, sz: 76*scale, flip: false },
+        { t: 0.58, la: 0.78, sz: 64*scale, flip: true  },
+        { t: 0.74, la: 0.90, sz: 54*scale, flip: false }
+      ]
+    },
+    {
+      rootX: cx + 128*scale, rootY: H*0.84,
+      tipX:  cx + 162*scale, tipY:  H*0.385,
+      cp1x:  18*scale, cp1y: cpdy(0.84, 0.385, 0.28),
+      cp2x:  34*scale, cp2y: cpdy(0.84, 0.385, 0.66),
+      thick: 12, size: 64*scale, delay: 0.60, bPhase: 1.25, bAmp: 1.10,
+      leaves: [
+        { t: 0.30, la: 0.78, sz: 72*scale, flip: true  },
+        { t: 0.55, la: 0.85, sz: 58*scale, flip: false },
+        { t: 0.74, la: 0.80, sz: 46*scale, flip: true  }
+      ]
+    },
+    {
+      rootX: cx + 195*scale, rootY: H*0.86,
+      tipX:  cx + 232*scale, tipY:  H*0.505,
+      cp1x:  22*scale, cp1y: cpdy(0.86, 0.505, 0.30),
+      cp2x:  42*scale, cp2y: cpdy(0.86, 0.505, 0.68),
+      thick: 9, size: 54*scale, delay: 0.90, bPhase: 2.10, bAmp: 1.25,
+      leaves: [
+        { t: 0.35, la: 0.82, sz: 60*scale, flip: true  },
+        { t: 0.64, la: 0.78, sz: 46*scale, flip: false }
+      ]
+    }
+  ];
+
+  // ── Foliage bouquet — organic stems from center spreading outward ──
+  foliageDefs = [
+    // Back layer — wide spread
+    {
+      rx: cx - 8*scale,  ry: H*0.90, tx: cx - 88*scale,  ty: H*0.69,
+      c1x: -28*scale, c1yf: 0.28, c2x: -58*scale, c2yf: 0.65,
+      thick: 9, delay: 0.04, bPhase: 0.3, bDir: -1,
+      leaves: [
+        { t: 0.44, la: 0.90, sz: 100*scale, flip: false },
+        { t: 0.80, la: 0.85, sz:  78*scale, flip: true  }
+      ]
+    },
+    {
+      rx: cx + 5*scale,  ry: H*0.90, tx: cx + 92*scale,  ty: H*0.70,
+      c1x:  30*scale, c1yf: 0.28, c2x:  62*scale, c2yf: 0.65,
+      thick: 9, delay: 0.04, bPhase: 0.6, bDir:  1,
+      leaves: [
+        { t: 0.44, la: 0.90, sz:  96*scale, flip: true  },
+        { t: 0.80, la: 0.85, sz:  74*scale, flip: false }
+      ]
+    },
+    {
+      rx: cx - 6*scale,  ry: H*0.91, tx: cx - 148*scale, ty: H*0.72,
+      c1x: -52*scale, c1yf: 0.26, c2x: -98*scale, c2yf: 0.64,
+      thick: 8, delay: 0.14, bPhase: 1.1, bDir: -1,
+      leaves: [
+        { t: 0.40, la: 0.85, sz: 86*scale, flip: false },
+        { t: 0.74, la: 0.80, sz: 66*scale, flip: true  }
+      ]
+    },
+    {
+      rx: cx + 5*scale,  ry: H*0.91, tx: cx + 150*scale, ty: H*0.73,
+      c1x:  54*scale, c1yf: 0.26, c2x: 100*scale, c2yf: 0.64,
+      thick: 8, delay: 0.14, bPhase: 1.4, bDir:  1,
+      leaves: [
+        { t: 0.40, la: 0.85, sz: 84*scale, flip: true  },
+        { t: 0.74, la: 0.80, sz: 64*scale, flip: false }
+      ]
+    },
+    // Middle layer
+    {
+      rx: cx - 10*scale, ry: H*0.89, tx: cx - 52*scale,  ty: H*0.66,
+      c1x: -18*scale, c1yf: 0.30, c2x: -36*scale, c2yf: 0.67,
+      thick: 10, delay: 0.02, bPhase: 0.8, bDir: -1,
+      leaves: [
+        { t: 0.36, la: 0.88, sz: 108*scale, flip: false },
+        { t: 0.62, la: 0.82, sz:  88*scale, flip: true  },
+        { t: 0.86, la: 0.78, sz:  68*scale, flip: false }
+      ]
+    },
+    {
+      rx: cx + 8*scale,  ry: H*0.89, tx: cx + 54*scale,  ty: H*0.67,
+      c1x:  20*scale, c1yf: 0.30, c2x:  38*scale, c2yf: 0.67,
+      thick: 10, delay: 0.02, bPhase: 1.0, bDir:  1,
+      leaves: [
+        { t: 0.36, la: 0.88, sz: 104*scale, flip: true  },
+        { t: 0.62, la: 0.82, sz:  84*scale, flip: false },
+        { t: 0.86, la: 0.78, sz:  64*scale, flip: true  }
+      ]
+    },
+    // Center upright — densest
+    {
+      rx: cx - 5*scale,  ry: H*0.88, tx: cx - 16*scale,  ty: H*0.61,
+      c1x:  -6*scale, c1yf: 0.30, c2x: -12*scale, c2yf: 0.67,
+      thick: 11, delay: 0.00, bPhase: 0.1, bDir: -1,
+      leaves: [
+        { t: 0.28, la: 0.85, sz: 115*scale, flip: true  },
+        { t: 0.52, la: 0.80, sz:  96*scale, flip: false },
+        { t: 0.76, la: 0.88, sz:  74*scale, flip: true  }
+      ]
+    },
+    {
+      rx: cx + 8*scale,  ry: H*0.88, tx: cx + 18*scale,  ty: H*0.62,
+      c1x:   8*scale, c1yf: 0.30, c2x:  14*scale, c2yf: 0.67,
+      thick: 11, delay: 0.00, bPhase: 0.4, bDir:  1,
+      leaves: [
+        { t: 0.28, la: 0.85, sz: 110*scale, flip: false },
+        { t: 0.52, la: 0.80, sz:  90*scale, flip: true  },
+        { t: 0.76, la: 0.88, sz:  70*scale, flip: false }
+      ]
+    },
+    // Front low layer
+    {
+      rx: cx - 12*scale, ry: H*0.92, tx: cx - 108*scale, ty: H*0.77,
+      c1x: -38*scale, c1yf: 0.27, c2x: -74*scale, c2yf: 0.65,
+      thick: 8, delay: 0.20, bPhase: 1.8, bDir: -1,
+      leaves: [
+        { t: 0.50, la: 0.82, sz: 80*scale, flip: false },
+        { t: 0.84, la: 0.78, sz: 60*scale, flip: true  }
+      ]
+    },
+    {
+      rx: cx + 10*scale, ry: H*0.92, tx: cx + 110*scale, ty: H*0.77,
+      c1x:  40*scale, c1yf: 0.27, c2x:  76*scale, c2yf: 0.65,
+      thick: 8, delay: 0.20, bPhase: 2.0, bDir:  1,
+      leaves: [
+        { t: 0.50, la: 0.82, sz: 78*scale, flip: true  },
+        { t: 0.84, la: 0.78, sz: 58*scale, flip: false }
+      ]
+    }
+  ];
+
+  // ── Grass blades ──────────────────────────────────────────────────
+  grassDefs = [
+    // Left side
+    { x:cx-215*scale, y:H*0.87, h:168*scale, lean:-32*scale, curl:-65*scale, thick:6.0, alpha:0.64, d:0.08, bp:0.30 },
+    { x:cx-185*scale, y:H*0.86, h:200*scale, lean:-15*scale, curl:-82*scale, thick:6.5, alpha:0.70, d:0.00, bp:1.10 },
+    { x:cx-160*scale, y:H*0.88, h:150*scale, lean:-40*scale, curl:-48*scale, thick:5.0, alpha:0.58, d:0.18, bp:0.70 },
+    { x:cx-240*scale, y:H*0.85, h:128*scale, lean:-52*scale, curl:-34*scale, thick:4.2, alpha:0.48, d:0.28, bp:2.00 },
+    { x:cx-262*scale, y:H*0.84, h:108*scale, lean:-62*scale, curl:-24*scale, thick:3.6, alpha:0.42, d:0.40, bp:0.90 },
+    { x:cx-202*scale, y:H*0.89, h:115*scale, lean:-12*scale, curl:-55*scale, thick:4.5, alpha:0.54, d:0.13, bp:1.60 },
+    { x:cx-175*scale, y:H*0.87, h:175*scale, lean:-24*scale, curl:-72*scale, thick:5.2, alpha:0.62, d:0.04, bp:0.50 },
+    { x:cx-225*scale, y:H*0.86, h:140*scale, lean:-45*scale, curl:-40*scale, thick:4.0, alpha:0.46, d:0.23, bp:1.80 },
+    { x:cx-280*scale, y:H*0.85, h: 90*scale, lean:-70*scale, curl:-15*scale, thick:3.2, alpha:0.36, d:0.50, bp:0.60 },
+    { x:cx-145*scale, y:H*0.89, h:130*scale, lean:-28*scale, curl:-55*scale, thick:4.8, alpha:0.55, d:0.16, bp:2.20 },
+    // Right side
+    { x:cx+210*scale, y:H*0.87, h:162*scale, lean: 30*scale, curl: 62*scale, thick:6.0, alpha:0.64, d:0.08, bp:0.40 },
+    { x:cx+180*scale, y:H*0.86, h:195*scale, lean: 13*scale, curl: 78*scale, thick:6.5, alpha:0.70, d:0.00, bp:1.00 },
+    { x:cx+155*scale, y:H*0.88, h:145*scale, lean: 38*scale, curl: 45*scale, thick:5.0, alpha:0.58, d:0.18, bp:0.80 },
+    { x:cx+235*scale, y:H*0.85, h:122*scale, lean: 48*scale, curl: 32*scale, thick:4.2, alpha:0.48, d:0.28, bp:2.10 },
+    { x:cx+258*scale, y:H*0.84, h:102*scale, lean: 60*scale, curl: 22*scale, thick:3.6, alpha:0.42, d:0.40, bp:1.00 },
+    { x:cx+196*scale, y:H*0.89, h:110*scale, lean: 10*scale, curl: 52*scale, thick:4.5, alpha:0.54, d:0.14, bp:1.50 },
+    { x:cx+170*scale, y:H*0.87, h:170*scale, lean: 22*scale, curl: 68*scale, thick:5.2, alpha:0.62, d:0.04, bp:0.60 },
+    { x:cx+220*scale, y:H*0.86, h:135*scale, lean: 42*scale, curl: 37*scale, thick:4.0, alpha:0.46, d:0.23, bp:1.70 },
+    { x:cx+275*scale, y:H*0.85, h: 88*scale, lean: 68*scale, curl: 14*scale, thick:3.2, alpha:0.36, d:0.50, bp:0.55 },
+    { x:cx+142*scale, y:H*0.89, h:125*scale, lean: 25*scale, curl: 52*scale, thick:4.8, alpha:0.55, d:0.16, bp:2.30 }
+  ];
+}
+
+// ─── Main draw loop ───────────────────────────────────────────────────
+function draw(ts) {
+  if (!startTime) startTime = ts;
+  var t = (ts - startTime) / 1000;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Night background
+  var bg = ctx.createRadialGradient(cx, H*1.05, 0, cx, H*0.05, H*1.35);
+  bg.addColorStop(0,    '#0e2268');
+  bg.addColorStop(0.30, '#081548');
+  bg.addColorStop(1,    '#020818');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ground fog
+  var fog = ctx.createRadialGradient(cx, H*0.86, 0, cx, H*0.86, W*0.52);
+  fog.addColorStop(0, 'rgba(28,75,158,0.24)');
+  fog.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = fog;
+  ctx.beginPath();
+  ctx.ellipse(cx, H*0.86, W*0.52, H*0.09, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Particles & pollen
+  drawParticles(t);
+  if (t > BREEZE_START && !pollenActive) pollenActive = true;
+  if (pollenActive && t - lastPollen > 0.38) { spawnPollen(); lastPollen = t; }
+
+  // Grass
+  for (var i = 0; i < grassDefs.length; i++) {
+    var g  = grassDefs[i];
+    var p  = easeOut3(progress(t, g.d, GROW_DUR * 0.62));
+    var bz = breezeVal(t, g.bp, g.lean < 0 ? -1 : 1);
+    drawGrass(g, p, bz);
+  }
+
+  // Foliage bouquet (drawn before main stems)
+  for (var i = 0; i < foliageDefs.length; i++) {
+    var fd     = foliageDefs[i];
+    var totalD = GROW_DUR - fd.delay;
+    var stemP  = easeOut5(progress(t, fd.delay, totalD * 0.58));
+    var bz     = breezeVal(t, fd.bPhase, fd.bDir * 0.85);
+    var absH   = Math.abs(fd.ry - fd.ty);
+    // Build a descriptor compatible with drawStem / stemPt
+    var fsd = {
+      rootX: fd.rx, rootY: fd.ry,
+      tipX:  fd.tx, tipY:  fd.ty,
+      cp1x:  fd.c1x, cp1y: -absH * fd.c1yf,
+      cp2x:  fd.c2x, cp2y: -absH * fd.c2yf,
+      thick: fd.thick,
+      bAmp:  fd.bDir * 0.85
+    };
+    drawStem(fsd, stemP, bz);
+    for (var j = 0; j < fd.leaves.length; j++) {
+      var lf = fd.leaves[j];
+      var lp = easeOut3(progress(t, fd.delay + lf.t * totalD * 0.44, 0.55));
+      var sp = stemPt(fsd, stemP, lf.t, bz);
+      drawLeaf(sp.x, sp.y, sp.angle, lf.la, lf.sz, lp, 0.70, lf.flip);
+    }
+  }
+
+  // Main flower stems + flowers
+  for (var i = 0; i < flowerDefs.length; i++) {
+    var fd     = flowerDefs[i];
+    var totalD = GROW_DUR - fd.delay;
+    var stemP  = easeOut5(progress(t, fd.delay, totalD * 0.55));
+    var bz     = breezeVal(t, fd.bPhase, fd.bAmp);
+    drawStem(fd, stemP, bz);
+    for (var j = 0; j < fd.leaves.length; j++) {
+      var lf = fd.leaves[j];
+      var lp = easeOut3(progress(t, fd.delay + lf.t * totalD * 0.42, 0.55));
+      var sp = stemPt(fd, stemP, lf.t, bz);
+      drawLeaf(sp.x, sp.y, sp.angle, lf.la, lf.sz, lp, 0.68, lf.flip);
+    }
+    if (stemP > 0.80) {
+      var fp  = easeOut3(progress(t, fd.delay + totalD * 0.55, 1.0));
+      var tip = stemPt(fd, stemP, 1.0, bz);
+      drawFlower(tip.x, tip.y, fp, fd.size, bz, fd.bAmp);
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────
+function init() {
+  W  = canvas.width  = window.innerWidth;
+  H  = canvas.height = window.innerHeight;
+  cx = W / 2;
+  scale = Math.min(W, H) / 750;
+  buildScene();
+  for (var i = 0; i < 65; i++) ambientParts.push(makeAmbient());
+}
+
+function onResize() {
+  W  = canvas.width  = window.innerWidth;
+  H  = canvas.height = window.innerHeight;
+  cx = W / 2;
+  scale = Math.min(W, H) / 750;
+  buildScene();
+}
+
+init();
+window.addEventListener('resize', onResize);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
